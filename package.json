@@ -1,0 +1,55 @@
+{
+  "name": "tips-index-ratio",
+  "version": "1.0.0",
+  "description": "US TIPS inflation math per 31 CFR 356 Appendix B — reference-CPI interpolation, index ratios, inflation-adjusted principal and interest, deflation floor. Reproduces TreasuryDirect's published values. Zero dependencies.",
+  "keywords": [
+    "tips",
+    "treasury-inflation-protected",
+    "index-ratio",
+    "reference-cpi",
+    "inflation",
+    "cpi",
+    "treasury",
+    "fixed-income",
+    "bonds",
+    "finance",
+    "linker"
+  ],
+  "homepage": "https://moshemalka.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moshejs/tips-index-ratio.git"
+  },
+  "bugs": "https://github.com/moshejs/tips-index-ratio/issues",
+  "author": "Moshe Malka <hello@moshemalka.com> (https://moshemalka.com)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
