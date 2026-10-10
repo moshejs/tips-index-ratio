@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  TREASURY_FALLBACK_CPI,
   adjustedPrincipal,
+  fallbackCpi,
   indexRatio,
   interestPayment,
   redemptionValue,
   refCpi,
 } from "../src/index.js";
+import { CPI as TD_CPI, DAILY, DATED } from "./fixtures.js";
 
 // Real CPI-U NSA (BLS series CUUR0000SA0), fetched 2026-07-10.
 const CPI = {
@@ -108,5 +111,60 @@ describe("validation", () => {
     expect(() => adjustedPrincipal(-1, 1.02)).toThrow(RangeError);
     expect(() => adjustedPrincipal(1000, 0)).toThrow(RangeError);
     expect(() => interestPayment(1000, 0.0125, 1.02, 0)).toThrow(RangeError);
+  });
+});
+
+describe("reproduces TreasuryDirect daily TIPS tables (test/fixtures.ts)", () => {
+  it(`ref CPI and index ratio for ${DAILY.length} CUSIP-days`, () => {
+    for (const [cusip, date, ref, ratio] of DAILY) {
+      expect(refCpi(date, TD_CPI), `${cusip} ${date} refCpi`).toBe(ref);
+      expect(indexRatio({ date, datedDate: DATED[cusip] as string, cpi: TD_CPI }), `${cusip} ${date}`).toBe(
+        ratio,
+      );
+    }
+  });
+
+  it("rounds an exact sixth-decimal tie up, like Treasury (was 1.15446)", () => {
+    // 9128274Y5 on 2004-08-13: 189.33226 / 164.00000 = 1.154465 exactly;
+    // floating-point division gives 1.1544649999…, which v1.0.0 rounded down.
+    expect(refCpi("2004-08-13", TD_CPI)).toBe(189.33226);
+    expect(refCpi("1999-01-15", TD_CPI)).toBe(164);
+    expect(indexRatio({ date: "2004-08-13", datedDate: "1999-01-15", cpi: TD_CPI })).toBe(1.15447);
+    expect(indexRatio({ date: "2007-12-21", datedDate: "1999-01-15", cpi: TD_CPI })).toBe(1.27304);
+  });
+});
+
+describe("fallback CPI (31 CFR 356 Appendix B (iv))", () => {
+  it("reproduces Treasury's October 2025 index number", () => {
+    // BLS published no October 2025 CPI-U. Sep 2025 = 324.800, Sep 2024 = 315.301.
+    expect(fallbackCpi("2025-10", { "2024-09": 315.301, "2025-09": 324.8 })).toBe(325.604);
+    expect(TREASURY_FALLBACK_CPI["2025-10"]).toBe(325.604);
+  });
+
+  it("generalizes to a CPI last reported N months earlier", () => {
+    const cpi = { "2024-08": 314.796, "2025-08": 323.976 };
+    expect(fallbackCpi("2025-10", cpi)).toBe(Math.round(323.976 * (323.976 / 314.796) ** (2 / 12) * 1000) / 1000);
+  });
+
+  it("lets a BLS series price TIPS dated 2026-01-15 (CUSIP 91282CPU9)", () => {
+    const cpi = { ...CPI, ...TREASURY_FALLBACK_CPI };
+    // TreasuryDirect: refCpiOnDatedDate = 324.934710
+    expect(refCpi("2026-01-15", cpi)).toBe(324.93471);
+    // TreasuryDirect daily index for 2026-02-01: 0.99750
+    expect(indexRatio({ date: "2026-02-01", datedDate: "2026-01-15", cpi })).toBe(0.9975);
+  });
+
+  it("validates the month and needs a year-earlier value", () => {
+    expect(() => fallbackCpi("2025-13", CPI)).toThrow(RangeError);
+    expect(() => fallbackCpi("2025-10", { "2025-09": 324.8 })).toThrow(/missing "2024-09"/);
+    expect(() => fallbackCpi("2025-10", {})).toThrow(RangeError);
+  });
+});
+
+describe("inputs with more than three decimals", () => {
+  it("still truncates to six and rounds to five decimals", () => {
+    const cpi = { "2026-01": 325.2524, "2026-02": 326.7851 };
+    const raw = refCpi("2026-04-15", cpi, { rounded: false });
+    expect(refCpi("2026-04-15", cpi)).toBe(Math.round(Math.trunc(raw * 1e6) / 10) / 1e5);
   });
 });
