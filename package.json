@@ -1,6 +1,6 @@
 {
   "name": "tips-index-ratio",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "US TIPS inflation math per 31 CFR 356 Appendix B — reference-CPI interpolation, index ratios, inflation-adjusted principal and interest, deflation floor. Reproduces TreasuryDirect's published values. Zero dependencies.",
   "keywords": [
     "tips",
