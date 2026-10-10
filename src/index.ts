@@ -60,20 +60,91 @@ function cpiFor(cpi: CpiSeries, y: number, m: number, forDate: string): number {
   if (v === undefined || !Number.isFinite(v) || v <= 0) {
     throw new RangeError(
       `CPI series is missing "${key}" (needed for reference CPI on ${forDate}); ` +
-        `provide CPI-U NSA values for the third and second months before the target month`,
+        `provide CPI-U NSA values for the third and second months before the target month ` +
+        `(for a month BLS never published, see TREASURY_FALLBACK_CPI / fallbackCpi)`,
     );
   }
   return v;
 }
 
-function round5(x: number): number {
-  return Math.round(x * 1e5) / 1e5;
+/**
+ * Appendix B: "we truncate calculations with regard to the Ref CPI and the
+ * Index Ratio for a specific date to six decimal places, and round to five".
+ * `micro` is the truncated value in millionths; returns the 5-decimal value.
+ */
+function roundFromMicro(micro: number): number {
+  return Math.floor((micro + 5) / 10) / 1e5;
+}
+
+/** Floor of a / b for non-negative integers a, b below 2^53 — exact. */
+function intDiv(a: number, b: number): number {
+  return (a - (a % b)) / b;
+}
+
+/** v in thousandths when v has at most three decimals (as BLS publishes CPI-U). */
+function toMilli(v: number): number | undefined {
+  const m = Math.round(v * 1000);
+  return Math.abs(m - v * 1000) < 1e-6 ? m : undefined;
+}
+
+/** v in hundred-thousandths when v has at most five decimals. */
+function toE5(v: number): number | undefined {
+  const m = Math.round(v * 1e5);
+  return Math.abs(m - v * 1e5) < 1e-4 ? m : undefined;
+}
+
+/** Float fallback for inputs with more decimals than the exact path handles. */
+function truncRound(x: number): number {
+  return roundFromMicro(Math.floor(x * 1e6 + 1e-6));
+}
+
+/**
+ * Index numbers Treasury announced for months BLS did not report in time,
+ * per 31 CFR 356 Appendix B (iv)(c): once announced they are used for all
+ * TIPS calculations, even if BLS publishes a value later. Merge them into a
+ * BLS series: `{ ...bls, ...TREASURY_FALLBACK_CPI }`.
+ *
+ * - 2025-10: BLS published no October 2025 CPI (federal shutdown). 325.604 =
+ *   fallbackCpi for Sep 2025 324.800 / Sep 2024 315.301, and reproduces every
+ *   TreasuryDirect ref CPI for December 2025 and January 2026.
+ */
+export const TREASURY_FALLBACK_CPI: CpiSeries = Object.freeze({ "2025-10": 325.604 });
+
+/**
+ * The index number Treasury substitutes for a CPI that is not reported on
+ * time (31 CFR 356 Appendix B (iv)): the last reported CPI, N months
+ * earlier, grown at its trailing twelve-month rate —
+ * `CPI[M−N] × (CPI[M−N] / CPI[M−N−12])^(N/12)` — rounded to three decimals
+ * like a published CPI.
+ *
+ * ```ts
+ * fallbackCpi("2025-10", bls); // 325.604 — Treasury's announced value
+ * ```
+ */
+export function fallbackCpi(month: string, cpi: CpiSeries): number {
+  const mm = /^(\d{4})-(\d{2})$/.exec(month);
+  if (!mm || Number(mm[2]) < 1 || Number(mm[2]) > 12) {
+    throw new RangeError(`Invalid month: "${month}" (expected YYYY-MM)`);
+  }
+  const y = Number(mm[1]);
+  const m = Number(mm[2]);
+  for (let n = 1; n <= 12; n++) {
+    const last = addMonths(y, m, -n);
+    const v = cpi[monthKey(last.y, last.m)];
+    if (v === undefined || !Number.isFinite(v) || v <= 0) continue;
+    const prior = addMonths(last.y, last.m, -12);
+    const base = cpiFor(cpi, prior.y, prior.m, `fallback for ${month}`);
+    return Math.round(v * (v / base) ** (n / 12) * 1000) / 1000;
+  }
+  throw new RangeError(`No CPI reported in the 12 months before ${month}`);
 }
 
 export interface RefCpiOptions {
   /**
-   * Round to 5 decimal places per the Treasury's published convention.
-   * Default true (matches TreasuryDirect's refCpi fields).
+   * Truncate to 6 and round to 5 decimal places per 31 CFR 356 Appendix B.
+   * Default true (matches TreasuryDirect's refCpi and index ratio fields).
+   * Computed in exact integer arithmetic when CPI values have at most three
+   * decimals, so ties at the sixth decimal round the way Treasury's do.
    */
   rounded?: boolean;
 }
@@ -96,8 +167,14 @@ export function refCpi(date: DateInput, cpi: CpiSeries, opts: RefCpiOptions = {}
   const cpiBase = cpiFor(cpi, base.y, base.m, dateStr);
   const cpiNext = cpiFor(cpi, next.y, next.m, dateStr);
   const D = daysInMonth(y, m);
-  const raw = cpiBase + ((d - 1) / D) * (cpiNext - cpiBase);
-  return (opts.rounded ?? true) ? round5(raw) : raw;
+  if (!(opts.rounded ?? true)) return cpiBase + ((d - 1) / D) * (cpiNext - cpiBase);
+  const b = toMilli(cpiBase);
+  const n = toMilli(cpiNext);
+  if (b === undefined || n === undefined) {
+    return truncRound(cpiBase + ((d - 1) / D) * (cpiNext - cpiBase));
+  }
+  // Ref CPI in millionths = 1000 · (b·D + (d−1)·(n−b)) / D, truncated.
+  return roundFromMicro(intDiv(1000 * (b * D + (d - 1) * (n - b)), D));
 }
 
 export interface IndexRatioParams {
@@ -111,7 +188,8 @@ export interface IndexRatioParams {
 
 /**
  * Index ratio = refCPI(date) / refCPI(datedDate), computed on 5-decimal
- * reference CPIs and rounded to 5 decimals, per the Treasury convention.
+ * reference CPIs, then truncated to 6 and rounded to 5 decimals, per the
+ * Treasury convention.
  *
  * ```ts
  * indexRatio({ date: "2026-06-30", datedDate: "2026-04-15", cpi });
@@ -122,8 +200,15 @@ export function indexRatio(params: IndexRatioParams, opts: RefCpiOptions = {}): 
   const rounded = opts.rounded ?? true;
   const num = refCpi(params.date, params.cpi, { rounded });
   const den = refCpi(params.datedDate, params.cpi, { rounded });
-  const ratio = num / den;
-  return rounded ? round5(ratio) : ratio;
+  if (!rounded) return num / den;
+  // Exact: both ref CPIs are 5-decimal numbers. Floating-point division would
+  // turn an exact tie such as 189.33226 / 164 = 1.154465 into 1.1544649999…
+  const a = toE5(num);
+  const b = toE5(den);
+  if (a === undefined || b === undefined || a * 1e6 > Number.MAX_SAFE_INTEGER) {
+    return truncRound(num / den);
+  }
+  return roundFromMicro(intDiv(a * 1e6, b));
 }
 
 /** Inflation-adjusted principal: face × index ratio (no floor — see redemptionValue). */
